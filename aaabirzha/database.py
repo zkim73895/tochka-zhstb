@@ -6,17 +6,14 @@ conn.execute('PRAGMA journal_mode=WAL;')
 
 main_cursor = conn.cursor()
 
-def create_user(id, name, role, api_key):
+def create_user(id, name, role, api_key_hashed, api_key=None):
     cursor = conn.cursor()
-    # Parameterized query
-    # print('creating user...')
-    query = '''
-    INSERT INTO Users (id, name, role, api_key)
-    VALUES (?, ?, ?, ?);
+    query = f'''
+    INSERT INTO Users (id, name, role, api_key_hashed, api_key)
+    VALUES (?, ?, ?, ?, ?);
     '''
-    # Execute the query with parameters
     try:
-        cursor.execute(query, (str(id), name, int(role), api_key))
+        cursor.execute(query, (str(id), name, int(role), api_key_hashed, api_key))
     except Exception as e:
         print(e)
     print(f'User {name} created successfully')
@@ -144,6 +141,19 @@ WHERE user_id = ?'''
 
     cursor.close()
     return user
+
+def get_user_by_api_key(api_key, hashed=True):
+    api_key_column = 'api_key_hashed' if hashed else 'api_key'
+    cursor = conn.cursor()
+    query = f'''
+SELECT id, name, role, {api_key_column}
+FROM Users
+WHERE {api_key_column} = ?'''
+    cursor.execute(query, (api_key,))
+    user = cursor.fetchone()
+    if not user:
+        print('User not found')
+        raise Exception(f"User not found")
 
 
 print(

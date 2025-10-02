@@ -1,24 +1,72 @@
-import random
-
 import uvicorn
-from fastapi import FastAPI, Depends, HTTPException, Body
+from fastapi import FastAPI, Depends, HTTPException, Body, APIRouter
+from fastapi.security import APIKeyHeader
 from fastapi.responses import JSONResponse
 from typing import List
 from uuid import UUID, uuid4
+import secrets
+import hashlib
+import hmac
 
+#DB operations stored as functions
 import database as db_fnc
 
-# Import all modules
+# Pydantic models
 from schemas import (
-    User, UserCreate, Instrument, InstrumentCreate,
+    User, UserCreate, Instrument, InstrumentCreate, UserRole,
     MarketOrder, MarketOrderCreate, LimitOrder, LimitOrderCreate,
     Ok, AlterBalanceRequest
 )
 
-
-app = FastAPI(title="Stock Exchange API", version="1.0.0")
+#Config
+app = FastAPI(title="Stock Exchange API", version="0.2.2")
 db = db_fnc.main_cursor
 
+#A toggle to (dis)allow the use of unhashed api keys
+#Users created while the toggle is ON will have no unhashed api_key, beware of unexpected behaviour
+#Схема на swagger не подразумевает хэширование ключей, но вообще учитывая контекст биржи и финансовых операций,
+#такой функционал бы пригодился
+USE_HASHED_API_KEYS = False
+
+auth_header = APIKeyHeader(name="Authorization", auto_error=False)
+
+def hash_api_key(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+def secure_compare(a: str, b: str) -> bool:
+    return hmac.compare_digest(a, b)
+
+def parse_token_header(header: str) -> str:
+    if not header:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    try:
+        scheme, token = header.split(" ", 1)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Malformed Authorization header")
+    if scheme != "TOKEN":
+        raise HTTPException(status_code=401, detail="Invalid auth scheme (use 'TOKEN')")
+    return token
+
+#Get the user whose api key corresponds to the one in the header. Uses SHA256 regardless of the toggle
+async def get_current_user(header_value: Optional[str] = Depends(auth_header)) -> User:
+    raw_key = parse_token_header(header_value)
+    hashed_key = hash_api_key(raw_key)
+
+    rec = db_fnc.get_user_by_api_key(hashed_key)
+    if not rec:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    if not secure_compare(rec["api_key_hashed"], hashed_key):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    return User(id=rec["user_id"], name=rec["name"], role=rec["role"], api_key = hashed_key if USE_HASHED_API_KEYS else raw_key)
+
+# Role-checking dependency factory
+def require_role(required_role: UserRole):
+    async def _dependency(current_user: User = Depends(get_current_user)):
+        if current_user.role != required_role:
+            raise HTTPException(status_code=403, detail="Insufficient privileges")
+        return current_user
+    return _dependency
 
 
 # Basic routes
@@ -33,20 +81,27 @@ async def health_check():
 
 ###
 
+#Public endpoints, no API token required
 @app.post("/api/v1/public/register", response_model=User)
 async def create_user(data: UserCreate):
     try:
+        raw_key = f"key-{secrets.token_hex(16)}"
+        hashed_key = hash_api_key(raw_key)
         user = User(
             id=uuid4(),
             name=data.name,
-            api_key='N/A'
+            api_key=hashed_key if USE_HASHED_API_KEYS else raw_key
         )
-        db_fnc.create_user(user.id, user.name, user.role, user.api_key)
+        db_fnc.create_user(user.id, user.name, user.role, hashed_key, None if USE_HASHED_API_KEYS else raw_key)
         return user
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
-@app.delete("/api/v1/admin/user/{user_id}", response_model=User)
+
+#Admin endpoints, ADMIN user role dependency check included
+admin_router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends(require_role(UserRole.ADMIN))])
+
+@admin_router.delete("/user/{user_id}", response_model=User)
 async def delete_user(user_id: UUID):
     try:
         user_data = db_fnc.delete_user(user_id)
@@ -61,7 +116,7 @@ async def delete_user(user_id: UUID):
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
 
-@app.post("/api/v1/admin/instrument", response_model=Ok)
+@admin_router.post("/instrument", response_model=Ok)
 async def create_instrument(create_request: InstrumentCreate):
     try:
         instrument = Instrument(
@@ -74,7 +129,7 @@ async def create_instrument(create_request: InstrumentCreate):
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
 
-@app.post("/api/v1/admin/balance/deposit", response_model=Ok)
+@admin_router.post("/balance/deposit", response_model=Ok)
 async def update_balance(request: AlterBalanceRequest, is_deposit=True):
     if not db_fnc.lookup('Users', 'id', str(request.user_id)):
         raise HTTPException(status_code=422, detail='User not found')
@@ -88,93 +143,11 @@ async def update_balance(request: AlterBalanceRequest, is_deposit=True):
             raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
 
 
-@app.post("/api/v1/admin/balance/withdraw", response_model=Ok)
+@admin_router.post("/balance/withdraw", response_model=Ok)
 async def admin_withdraw(request: AlterBalanceRequest):
     return await update_balance(request, is_deposit=False)
 
 
-# @app.get("/api/v1/balance")
-# async def get_balance():
-#     pass
-
-
-# @app.get("/api/v1/public/instrument")
-# async def get_instruments():
-#     pass
-#
-#
-#
-#
-# ###
-#
-#
-# # User routes
-# @app.post("/users", response_model=User)
-# def create_user(user: UserCreate):
-#     # Check if API key already exists
-#     existing_user = None
-#     if existing_user:
-#         raise HTTPException(status_code=400, detail="API key already exists")
-#
-# @app.get("/users/{user_id}", response_model=User)
-# def get_user(user_id: str):
-#     pass
-#
-#
-# # Instrument routes
-# @app.post("/instruments", response_model=Instrument)
-# def create_instrument(instrument: InstrumentCreate):
-#     pass
-#
-# @app.get("/instruments", response_model=List[Instrument])
-# def list_instruments():
-#     instruments = None
-#     return [
-#         Instrument(id=inst.id, name=inst.name, ticker=inst.ticker)
-#         for inst in instruments
-#     ]
-#
-#
-# @app.get("/instruments/{ticker}", response_model=Instrument)
-# def get_instrument(ticker: str):
-#     pass
-#
-# # Order routes
-# @app.post("/orders/market", response_model=MarketOrder)
-# async def create_market_order(
-#         order: MarketOrderCreate,
-#         api_key: str
-# ):
-#     pass
-#
-#
-#
-# @app.post("/orders/limit", response_model=LimitOrder)
-# async def create_limit_order(
-#         order: LimitOrderCreate,
-#         api_key: str
-# ):
-#     pass
-#
-#
-# @app.get("/orders/market/{order_id}", response_model=MarketOrder)
-# def get_market_order(order_id: str):
-#     pass
-#
-#
-# @app.get("/orders/limit/{order_id}", response_model=LimitOrder)
-# def get_limit_order(order_id: str):
-#     pass
-#
-# # Get user's orders
-# @app.get("/users/{user_id}/orders/market", response_model=List[MarketOrder])
-# def get_user_market_orders(user_id: str):
-#     pass
-#
-#
-# @app.get("/users/{user_id}/orders/limit", response_model=List[LimitOrder])
-# def get_user_limit_orders(user_id: str):
-#     pass
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
