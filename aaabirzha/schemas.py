@@ -49,12 +49,8 @@ class InstrumentCreate(BaseModel):
 
 
 class Instrument(BaseModel):
-    id: Optional[int] = None
     name: str
     ticker: str
-
-    class Config:
-        from_attributes = True
 
 
 # Order schemas
@@ -90,12 +86,14 @@ class LimitOrderCreate(BaseModel):
     price: int
 
     @field_validator('qty')
+    @classmethod
     def check_qty(cls, value):
         if value < 1:
             raise ValueError('Order quantity may not be less than 1')
         return value
 
     @field_validator('price')
+    @classmethod
     def check_price(cls, value):
         if value <= 0:
             raise ValueError('Price may not be 0 or negative')
@@ -115,14 +113,18 @@ class LimitOrder(BaseModel):
     class Config:
         from_attributes = True
 
+class Ok(BaseModel):
+    success: bool = True
 
-# Message schemas for RabbitMQ
-class OrderMessage(BaseModel):
-    order_id: str
-    order_type: str  # "market" or "limit"
-    user_id: str
+
+class AlterBalanceRequest(BaseModel):
+    user_id: UUID
     ticker: str
-    direction: Direction
-    qty: int
-    price: Optional[int] = None
-    timestamp: datetime
+    amount: int
+
+    @field_validator('amount')
+    @classmethod
+    def is_non_negative(cls, amount: int) -> int:
+        if amount < 0:
+            raise ValueError('Amount may not be negative')
+        return amount

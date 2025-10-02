@@ -2,6 +2,7 @@ import random
 
 import uvicorn
 from fastapi import FastAPI, Depends, HTTPException, Body
+from fastapi.responses import JSONResponse
 from typing import List
 from uuid import UUID, uuid4
 
@@ -11,12 +12,12 @@ import database as db_fnc
 from schemas import (
     User, UserCreate, Instrument, InstrumentCreate,
     MarketOrder, MarketOrderCreate, LimitOrder, LimitOrderCreate,
-    OrderMessage
+    Ok, AlterBalanceRequest
 )
 
 
 app = FastAPI(title="Stock Exchange API", version="1.0.0")
-db = db_fnc.cursor
+db = db_fnc.main_cursor
 
 
 
@@ -42,8 +43,60 @@ async def create_user(data: UserCreate):
         )
         db_fnc.create_user(user.id, user.name, user.role, user.api_key)
         return user
-    except Exception:
-        raise HTTPException(status_code=422, detail="Validation Error")
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+@app.delete("/api/v1/admin/user/{user_id}", response_model=User)
+async def delete_user(user_id: UUID):
+    try:
+        user_data = db_fnc.delete_user(user_id)
+        user = User(
+            id=user_data['user_id'],
+            name=user_data['name'],
+            role=user_data['role'],
+            api_key=user_data['api_key']
+        )
+        return user
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+
+@app.post("/api/v1/admin/instrument", response_model=Ok)
+async def create_instrument(create_request: InstrumentCreate):
+    try:
+        instrument = Instrument(
+            name = create_request.name,
+            ticker = create_request.ticker
+        )
+        db_fnc.create_instrument(instrument.name, instrument.ticker)
+        return Ok()
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+
+@app.post("/api/v1/admin/balance/deposit", response_model=Ok)
+async def update_balance(request: AlterBalanceRequest, is_deposit=True):
+    if not db_fnc.lookup('Users', 'id', str(request.user_id)):
+        raise HTTPException(status_code=422, detail='User not found')
+    try:
+        db_fnc.update_balance(request.user_id, request.ticker, request.amount, is_deposit)
+        return Ok()
+    except Exception as e:
+        if isinstance(e, ValueError):
+            raise HTTPException(status_code=422, detail=f'Unprocessable content: {e}')
+        else:
+            raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
+
+
+@app.post("/api/v1/admin/balance/withdraw", response_model=Ok)
+async def admin_withdraw(request: AlterBalanceRequest):
+    return await update_balance(request, is_deposit=False)
+
+
+# @app.get("/api/v1/balance")
+# async def get_balance():
+#     pass
+
 
 # @app.get("/api/v1/public/instrument")
 # async def get_instruments():
