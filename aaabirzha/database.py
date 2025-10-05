@@ -1,5 +1,5 @@
 import sqlite3 as sql
-
+from schemas import MarketOrder, LimitOrder
 conn = sql.connect('database.db')
 
 conn.execute('PRAGMA journal_mode=WAL;')
@@ -37,6 +37,22 @@ def create_instrument(name, ticker):
         print(e)
     cursor.close()
 
+
+def delete_instrument(ticker):
+    cursor = conn.cursor()
+    print(f'Trying to delete instrument with ticker "{ticker}"')
+    query = '''
+    DELETE FROM Instruments
+    WHERE ticker = ?'''
+    try:
+        cursor.execute(query, (ticker))
+        print(f'Instrument {ticker} deleted')
+        conn.commit()
+    except sql.DatabaseError as e:
+        print(f'DBError: Failed to delete instrument {ticker}\n{e}')
+    cursor.close()
+
+
 def new_ticker(user_id, ticker):
     cursor = conn.cursor()
     query = '''
@@ -51,7 +67,7 @@ def new_ticker(user_id, ticker):
         print(f'{ticker} balance added to user {user_id}')
         conn.commit()
     except sql.DatabaseError as e:
-        print(f'Failed to add ticker {ticker} to user {user_id}\n{e}')
+        print(f'DBError: Failed to add ticker {ticker} to user {user_id}\n{e}')
     cursor.close()
 
 
@@ -104,8 +120,20 @@ def lookup(table, key, val):
     return result
 
 
-def lookup_balance(user_id, ticker):
+def lookup_balance(user_id, ticker=None):
     cursor = conn.cursor()
+
+    #If no ticker is specified, returns all tickers for the user
+    if not ticker:
+        query = f'''
+SELECT ticker, balance FROM UserBalance
+WHERE user_id = ?'''
+        print(f'Trying to look up balance of all instruments for user {user_id}')
+
+        cursor.execute(query, (user_id,))
+        response = cursor.fetchall()
+        return response
+
     query = f'''
     SELECT balance FROM UserBalance 
     WHERE user_id = ? AND ticker = ?
@@ -127,17 +155,22 @@ def delete_user(user_id):
     query = f'''
 SELECT * FROM Users
 WHERE user_id = ?'''
-    cursor.execute(query, (user_id,))
-    user = cursor.fetchone()
-    if not user:
-        print('User not found')
-        raise Exception(f"Cannot delete a non-existent user:\nUser {user_id} not found in the database")
 
     query1 = f'''
 DELETE FROM Users
 WHERE user_id = ?'''
-    print(f'Trying to delete user {user_id}\nQuery:\n{query1}')
-    cursor.execute(query1, (user_id,))
+
+    try:
+        cursor.execute(query, (user_id,))
+        user = cursor.fetchone()
+        if not user:
+            print('User not found')
+            raise Exception(f"Cannot delete a non-existent user:\nUser {user_id} not found in the database")
+
+        print(f'Trying to delete user {user_id}\nQuery:\n{query1}')
+        cursor.execute(query1, (user_id,))
+    except sql.DatabaseError as e:
+        print(f'DBError: Failed to delete user {user_id}\n{e}')
 
     cursor.close()
     return user
@@ -149,13 +182,33 @@ def get_user_by_api_key(api_key, hashed=True):
 SELECT id, name, role, {api_key_column}
 FROM Users
 WHERE {api_key_column} = ?'''
-    cursor.execute(query, (api_key,))
-    user = cursor.fetchone()
-    if not user:
-        print('User not found')
-        raise Exception(f"User not found")
+    try:
+        cursor.execute(query, (api_key,))
+        user = cursor.fetchone()
+        if not user:
+            print('User not found')
+            raise Exception(f"User not found")
+    except sql.DatabaseError as e:
+        print(f'DBError: Failed to get user by api_key = {api_key}\n{e}')
 
 
-print(
-    'sanya loh'
-)
+def create_market_order(order = MarketOrder):
+    cursor = conn.cursor()
+    query = f'''
+INSERT INTO MarketOrders
+(id, status, user_id, timestamp, direction, ticker, qty)
+VALUES (?, ?, ?, ?, ?, ?, ?)'''
+    try:
+        cursor.execute(query, (order.id, order.status, order.timestamp, order.direction, order.ticker, order.qty))
+    except sql.DatabaseError as e:
+        print(f'DBError: Failed to create order: {order.model_dump()}\n{e}')
+
+def temp():
+    try:
+        pass
+    except sql.DatabaseError as e:
+        print(f'DBError: Failed to AAAAAA\n{e}')
+
+# print(
+#     'sanya loh'
+# )

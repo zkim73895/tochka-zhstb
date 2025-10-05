@@ -1,15 +1,16 @@
 import uvicorn
 from fastapi import FastAPI, Depends, HTTPException, Body, APIRouter
 from fastapi.security import APIKeyHeader
-from fastapi.responses import JSONResponse
-from typing import List
+from typing import Optional, Union
 from uuid import UUID, uuid4
+from datetime import datetime
 import secrets
 import hashlib
 import hmac
 
 #DB operations stored as functions
 import database as db_fnc
+from aaabirzha.schemas import OrderStatus
 
 # Pydantic models
 from schemas import (
@@ -82,7 +83,9 @@ async def health_check():
 ###
 
 #Public endpoints, no API token required
-@app.post("/api/v1/public/register", response_model=User)
+public_router = APIRouter(prefix="/api/v1/public", tags=["public"])
+
+@public_router.post("/api/v1/public/register", response_model=User)
 async def create_user(data: UserCreate):
     try:
         raw_key = f"key-{secrets.token_hex(16)}"
@@ -97,11 +100,49 @@ async def create_user(data: UserCreate):
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
+@app.get("/api/v1/balance", tags=["balance"])
+async def get_balance(current_user: User = Depends(get_current_user)):
+    try:
+        return db_fnc.lookup_balance(current_user.id, ticker=None)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+app.include_router(public_router)
+
+
+#Order endpoints
+order_router = APIRouter(prefix="/api/v1/order", tags=["order"], dependencies=[Depends(get_current_user)])
+
+@order_router.get('/')
+async def get_orders(current_user: User = Depends(get_current_user)):
+    pass
+
+@order_router.post('/')
+async def create_order(create_request: Union[MarketOrderCreate, LimitOrderCreate], current_user: User = Depends(get_current_user)):
+    if isinstance(create_request, MarketOrderCreate):
+        order = MarketOrder(
+            id=uuid4(),
+            status=OrderStatus.NEW,
+            user_id=current_user.id,
+            direction=create_request.direction,
+            ticker=create_request.ticker,
+            qty=create_request.ticker,
+            timestamp=datetime.now()
+        )
+
+    pass
+
+@order_router.get('/{order_id}')
+async def get_order_details(order_id: str):
+    pass
+
+
 
 #Admin endpoints, ADMIN user role dependency check included
 admin_router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends(require_role(UserRole.ADMIN))])
+# admin_router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
-@admin_router.delete("/user/{user_id}", response_model=User)
+@admin_router.delete("/user/{user_id}", response_model=User, tags=["admin", "user"])
 async def delete_user(user_id: UUID):
     try:
         user_data = db_fnc.delete_user(user_id)
@@ -128,8 +169,15 @@ async def create_instrument(create_request: InstrumentCreate):
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
+@admin_router.delete("/instrument/{ticker}", response_model=Ok)
+async def delete_instrument(ticker: str):
+    try:
+        db_fnc.delete_instrument(ticker)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
-@admin_router.post("/balance/deposit", response_model=Ok)
+
+@admin_router.post("/balance/deposit", response_model=Ok, tags=["admin", "balance"])
 async def update_balance(request: AlterBalanceRequest, is_deposit=True):
     if not db_fnc.lookup('Users', 'id', str(request.user_id)):
         raise HTTPException(status_code=422, detail='User not found')
@@ -143,9 +191,11 @@ async def update_balance(request: AlterBalanceRequest, is_deposit=True):
             raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
 
 
-@admin_router.post("/balance/withdraw", response_model=Ok)
+@admin_router.post("/balance/withdraw", response_model=Ok, tags=["admin", "balance"])
 async def admin_withdraw(request: AlterBalanceRequest):
     return await update_balance(request, is_deposit=False)
+
+app.include_router(admin_router)
 
 
 
