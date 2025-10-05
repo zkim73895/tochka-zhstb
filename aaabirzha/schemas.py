@@ -54,7 +54,7 @@ class Instrument(BaseModel):
 
 
 # Order schemas
-class MarketOrderCreate(BaseModel):
+class MarketOrderBody(BaseModel):
     direction: Direction
     ticker: str
     qty: int
@@ -70,16 +70,14 @@ class MarketOrder(BaseModel):
     id: UUID
     status: OrderStatus
     user_id: UUID
-    direction: Direction
-    ticker: str
-    qty: int
+    body: MarketOrderBody
     timestamp: datetime
 
     class Config:
         from_attributes = True
 
 
-class LimitOrderCreate(BaseModel):
+class LimitOrderBody(BaseModel):
     direction: Direction
     ticker: str
     qty: int
@@ -104,14 +102,25 @@ class LimitOrder(BaseModel):
     id: UUID
     status: OrderStatus
     user_id: UUID
-    direction: Direction
-    ticker: str
-    qty: int
-    price: int
+    body: LimitOrderBody
     timestamp: datetime
+    filled: int = 0
 
     class Config:
         from_attributes = True
+
+
+class OrderType(IntEnum):
+    MARKET = 0
+    LIMIT = 1
+
+
+class Transaction(BaseModel):
+    ticker: str
+    amount: int
+    price: float
+    timestamp: datetime
+
 
 class Ok(BaseModel):
     success: bool = True

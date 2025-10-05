@@ -1,7 +1,7 @@
 import uvicorn
 from fastapi import FastAPI, Depends, HTTPException, Body, APIRouter
 from fastapi.security import APIKeyHeader
-from typing import Optional, Union
+from typing import Optional, Union, List
 from uuid import UUID, uuid4
 from datetime import datetime
 import secrets
@@ -15,8 +15,8 @@ from aaabirzha.schemas import OrderStatus
 # Pydantic models
 from schemas import (
     User, UserCreate, Instrument, InstrumentCreate, UserRole,
-    MarketOrder, MarketOrderCreate, LimitOrder, LimitOrderCreate,
-    Ok, AlterBalanceRequest
+    MarketOrder, MarketOrderBody, LimitOrder, LimitOrderBody,
+    Ok, AlterBalanceRequest, Transaction
 )
 
 #Config
@@ -85,7 +85,7 @@ async def health_check():
 #Public endpoints, no API token required
 public_router = APIRouter(prefix="/api/v1/public", tags=["public"])
 
-@public_router.post("/api/v1/public/register", response_model=User)
+@public_router.post("/register", response_model=User)
 async def create_user(data: UserCreate):
     try:
         raw_key = f"key-{secrets.token_hex(16)}"
@@ -99,6 +99,50 @@ async def create_user(data: UserCreate):
         return user
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+
+@public_router.get("/instrument", response_model=List[Instrument])
+async def get_instruments():
+    try:
+        instruments = [Instrument(
+            name = instrument['name'],
+            ticker = instrument['ticker']
+            )
+            for instrument in db_fnc.get_all_instruments()
+        ]
+        return instruments
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+
+@public_router.get("/orderbook/{ticker}", response_model=List[Union[MarketOrder, LimitOrder]])
+async def get_orderbook(ticker: str, limit: int = 10, current_user: User = Depends(get_current_user)):
+    try:
+        orderbook = [MarketOrder(order) if 'price' in order.keys() else LimitOrder(order)
+                     for order in db_fnc.get_orders_for_user(current_user.id, ticker=ticker)]
+        limit = min(limit, len(orderbook))
+        return orderbook[:limit]
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+
+@public_router.get("/transactions/{ticker}")
+async def get_transactions(ticker: str, limit: int = 10, current_user: User = Depends(get_current_user)):
+    try:
+        transactions = db_fnc.get_transactions_by_user(current_user.id, ticker=ticker)
+        transactions = [Transaction(
+            ticker = trans['ticker'],
+            amount = trans['amount'],
+            price = trans['price'],
+            timestamp = trans['timestamp']
+        )
+            for trans in transactions
+        ]
+        limit = min(limit, len(transactions))
+        return transactions[:limit]
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
 
 @app.get("/api/v1/balance", tags=["balance"])
 async def get_balance(current_user: User = Depends(get_current_user)):
@@ -115,27 +159,58 @@ order_router = APIRouter(prefix="/api/v1/order", tags=["order"], dependencies=[D
 
 @order_router.get('/')
 async def get_orders(current_user: User = Depends(get_current_user)):
-    pass
+    try:
+        return db_fnc.get_orders_for_user(current_user.id)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
 @order_router.post('/')
-async def create_order(create_request: Union[MarketOrderCreate, LimitOrderCreate], current_user: User = Depends(get_current_user)):
-    if isinstance(create_request, MarketOrderCreate):
-        order = MarketOrder(
-            id=uuid4(),
-            status=OrderStatus.NEW,
-            user_id=current_user.id,
-            direction=create_request.direction,
-            ticker=create_request.ticker,
-            qty=create_request.ticker,
-            timestamp=datetime.now()
-        )
+async def create_order(create_request: Union[MarketOrderBody, LimitOrderBody], current_user: User = Depends(get_current_user)):
+    try:
+        if isinstance(create_request, MarketOrderBody):
+            order = MarketOrder(
+                id=uuid4(),
+                status=OrderStatus.NEW,
+                user_id=current_user.id,
+                body = MarketOrderBody(
+                    direction=create_request.direction,
+                    ticker=create_request.ticker,
+                    qty=create_request.ticker
+                ),
+                timestamp=datetime.now()
+            )
+            db_fnc.create_market_order(order)
+        else:
+            order = LimitOrder(
+                id=uuid4(),
+                status=OrderStatus.NEW,
+                user_id=current_user.id,
+                body=LimitOrderBody(
+                    direction=create_request.direction,
+                    ticker=create_request.ticker,
+                    qty=create_request.ticker,
+                    price=create_request.price
+                ),
+                timestamp=datetime.now()
+            )
+            db_fnc.create_limit_order(order)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+    return {"success": True, "order_id": order.id}
 
-    pass
-
-@order_router.get('/{order_id}')
+@order_router.get('/{order_id}', response_model=Union[MarketOrder, LimitOrder])
 async def get_order_details(order_id: str):
-    pass
+    try:
+        return db_fnc.get_order_by_id(order_id)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
+@order_router.delete('/{order_id}', response_model=Ok)
+async def calcel_order(order_id: str):
+    try:
+        db_fnc.cancel_order(order_id)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
 
 #Admin endpoints, ADMIN user role dependency check included
