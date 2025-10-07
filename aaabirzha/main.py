@@ -1,23 +1,73 @@
-import random
-
 import uvicorn
-from fastapi import FastAPI, Depends, HTTPException, Body
-from typing import List
+from fastapi import FastAPI, Depends, HTTPException, Body, APIRouter
+from fastapi.security import APIKeyHeader
+from typing import Optional, Union, List
 from uuid import UUID, uuid4
+from datetime import datetime
+import secrets
+import hashlib
+import hmac
 
+#DB operations stored as functions
 import database as db_fnc
+from aaabirzha.schemas import OrderStatus
 
-# Import all modules
+# Pydantic models
 from schemas import (
-    User, UserCreate, Instrument, InstrumentCreate,
-    MarketOrder, MarketOrderCreate, LimitOrder, LimitOrderCreate,
-    OrderMessage
+    User, UserCreate, Instrument, InstrumentCreate, UserRole,
+    MarketOrder, MarketOrderBody, LimitOrder, LimitOrderBody,
+    Ok, AlterBalanceRequest, Transaction
 )
 
+#Config
+app = FastAPI(title="Stock Exchange API", version="0.2.2")
+db = db_fnc.main_cursor
 
-app = FastAPI(title="Stock Exchange API", version="1.0.0")
-db = db_fnc.cursor
+#A toggle to (dis)allow the use of unhashed api keys
+#Users created while the toggle is ON will have no unhashed api_key, beware of unexpected behaviour
+#Схема на swagger не подразумевает хэширование ключей, но вообще учитывая контекст биржи и финансовых операций,
+#такой функционал бы пригодился
+USE_HASHED_API_KEYS = False
 
+auth_header = APIKeyHeader(name="Authorization", auto_error=False)
+
+def hash_api_key(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+def secure_compare(a: str, b: str) -> bool:
+    return hmac.compare_digest(a, b)
+
+def parse_token_header(header: str) -> str:
+    if not header:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    try:
+        scheme, token = header.split(" ", 1)
+    except ValueError:
+        raise HTTPException(status_code=401, detail="Malformed Authorization header")
+    if scheme != "TOKEN":
+        raise HTTPException(status_code=401, detail="Invalid auth scheme (use 'TOKEN')")
+    return token
+
+#Get the user whose api key corresponds to the one in the header. Uses SHA256 regardless of the toggle
+async def get_current_user(header_value: Optional[str] = Depends(auth_header)) -> User:
+    raw_key = parse_token_header(header_value)
+    hashed_key = hash_api_key(raw_key)
+
+    rec = db_fnc.get_user_by_api_key(hashed_key)
+    if not rec:
+        raise HTTPException(status_code=401, detail="Invalid API key")
+    if not secure_compare(rec["api_key_hashed"], hashed_key):
+        raise HTTPException(status_code=401, detail="Invalid API key")
+
+    return User(id=rec["user_id"], name=rec["name"], role=rec["role"], api_key = hashed_key if USE_HASHED_API_KEYS else raw_key)
+
+# Role-checking dependency factory
+def require_role(required_role: UserRole):
+    async def _dependency(current_user: User = Depends(get_current_user)):
+        if current_user.role != required_role:
+            raise HTTPException(status_code=403, detail="Insufficient privileges")
+        return current_user
+    return _dependency
 
 
 # Basic routes
@@ -32,96 +82,197 @@ async def health_check():
 
 ###
 
-@app.post("/api/v1/public/register", response_model=User)
+#Public endpoints, no API token required
+public_router = APIRouter(prefix="/api/v1/public", tags=["public"])
+
+@public_router.post("/register", response_model=User)
 async def create_user(data: UserCreate):
     try:
+        raw_key = f"key-{secrets.token_hex(16)}"
+        hashed_key = hash_api_key(raw_key)
         user = User(
             id=uuid4(),
             name=data.name,
-            api_key='N/A'
+            api_key=hashed_key if USE_HASHED_API_KEYS else raw_key
         )
-        db_fnc.create_user(user.id, user.name, user.role, user.api_key)
+        db_fnc.create_user(user.id, user.name, user.role, hashed_key, None if USE_HASHED_API_KEYS else raw_key)
         return user
-    except Exception:
-        raise HTTPException(status_code=422, detail="Validation Error")
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
-# @app.get("/api/v1/public/instrument")
-# async def get_instruments():
-#     pass
-#
-#
-#
-#
-# ###
-#
-#
-# # User routes
-# @app.post("/users", response_model=User)
-# def create_user(user: UserCreate):
-#     # Check if API key already exists
-#     existing_user = None
-#     if existing_user:
-#         raise HTTPException(status_code=400, detail="API key already exists")
-#
-# @app.get("/users/{user_id}", response_model=User)
-# def get_user(user_id: str):
-#     pass
-#
-#
-# # Instrument routes
-# @app.post("/instruments", response_model=Instrument)
-# def create_instrument(instrument: InstrumentCreate):
-#     pass
-#
-# @app.get("/instruments", response_model=List[Instrument])
-# def list_instruments():
-#     instruments = None
-#     return [
-#         Instrument(id=inst.id, name=inst.name, ticker=inst.ticker)
-#         for inst in instruments
-#     ]
-#
-#
-# @app.get("/instruments/{ticker}", response_model=Instrument)
-# def get_instrument(ticker: str):
-#     pass
-#
-# # Order routes
-# @app.post("/orders/market", response_model=MarketOrder)
-# async def create_market_order(
-#         order: MarketOrderCreate,
-#         api_key: str
-# ):
-#     pass
-#
-#
-#
-# @app.post("/orders/limit", response_model=LimitOrder)
-# async def create_limit_order(
-#         order: LimitOrderCreate,
-#         api_key: str
-# ):
-#     pass
-#
-#
-# @app.get("/orders/market/{order_id}", response_model=MarketOrder)
-# def get_market_order(order_id: str):
-#     pass
-#
-#
-# @app.get("/orders/limit/{order_id}", response_model=LimitOrder)
-# def get_limit_order(order_id: str):
-#     pass
-#
-# # Get user's orders
-# @app.get("/users/{user_id}/orders/market", response_model=List[MarketOrder])
-# def get_user_market_orders(user_id: str):
-#     pass
-#
-#
-# @app.get("/users/{user_id}/orders/limit", response_model=List[LimitOrder])
-# def get_user_limit_orders(user_id: str):
-#     pass
+
+@public_router.get("/instrument", response_model=List[Instrument])
+async def get_instruments():
+    try:
+        instruments = [Instrument(
+            name = instrument['name'],
+            ticker = instrument['ticker']
+            )
+            for instrument in db_fnc.get_all_instruments()
+        ]
+        return instruments
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+
+@public_router.get("/orderbook/{ticker}", response_model=List[Union[MarketOrder, LimitOrder]])
+async def get_orderbook(ticker: str, limit: int = 10, current_user: User = Depends(get_current_user)):
+    try:
+        orderbook = [MarketOrder(order) if 'price' in order.keys() else LimitOrder(order)
+                     for order in db_fnc.get_orders_for_user(current_user.id, ticker=ticker)]
+        limit = min(limit, len(orderbook))
+        return orderbook[:limit]
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+
+@public_router.get("/transactions/{ticker}")
+async def get_transactions(ticker: str, limit: int = 10, current_user: User = Depends(get_current_user)):
+    try:
+        transactions = db_fnc.get_transactions_by_user(current_user.id, ticker=ticker)
+        transactions = [Transaction(
+            ticker = trans['ticker'],
+            amount = trans['amount'],
+            price = trans['price'],
+            timestamp = trans['timestamp']
+        )
+            for trans in transactions
+        ]
+        limit = min(limit, len(transactions))
+        return transactions[:limit]
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+
+@app.get("/api/v1/balance", tags=["balance"])
+async def get_balance(current_user: User = Depends(get_current_user)):
+    try:
+        return db_fnc.lookup_balance(current_user.id, ticker=None)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+app.include_router(public_router)
+
+
+#Order endpoints
+order_router = APIRouter(prefix="/api/v1/order", tags=["order"], dependencies=[Depends(get_current_user)])
+
+@order_router.get('/')
+async def get_orders(current_user: User = Depends(get_current_user)):
+    try:
+        return db_fnc.get_orders_for_user(current_user.id)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+@order_router.post('/')
+async def create_order(create_request: Union[MarketOrderBody, LimitOrderBody], current_user: User = Depends(get_current_user)):
+    try:
+        if isinstance(create_request, MarketOrderBody):
+            order = MarketOrder(
+                id=uuid4(),
+                status=OrderStatus.NEW,
+                user_id=current_user.id,
+                body = MarketOrderBody(
+                    direction=create_request.direction,
+                    ticker=create_request.ticker,
+                    qty=create_request.ticker
+                ),
+                timestamp=datetime.now()
+            )
+            db_fnc.create_market_order(order)
+        else:
+            order = LimitOrder(
+                id=uuid4(),
+                status=OrderStatus.NEW,
+                user_id=current_user.id,
+                body=LimitOrderBody(
+                    direction=create_request.direction,
+                    ticker=create_request.ticker,
+                    qty=create_request.ticker,
+                    price=create_request.price
+                ),
+                timestamp=datetime.now()
+            )
+            db_fnc.create_limit_order(order)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+    return {"success": True, "order_id": order.id}
+
+@order_router.get('/{order_id}', response_model=Union[MarketOrder, LimitOrder])
+async def get_order_details(order_id: str):
+    try:
+        return db_fnc.get_order_by_id(order_id)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+@order_router.delete('/{order_id}', response_model=Ok)
+async def calcel_order(order_id: str):
+    try:
+        db_fnc.cancel_order(order_id)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+
+#Admin endpoints, ADMIN user role dependency check included
+admin_router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends(require_role(UserRole.ADMIN))])
+# admin_router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
+
+@admin_router.delete("/user/{user_id}", response_model=User, tags=["admin", "user"])
+async def delete_user(user_id: UUID):
+    try:
+        user_data = db_fnc.delete_user(user_id)
+        user = User(
+            id=user_data['user_id'],
+            name=user_data['name'],
+            role=user_data['role'],
+            api_key=user_data['api_key']
+        )
+        return user
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+
+@admin_router.post("/instrument", response_model=Ok)
+async def create_instrument(create_request: InstrumentCreate):
+    try:
+        instrument = Instrument(
+            name = create_request.name,
+            ticker = create_request.ticker
+        )
+        db_fnc.create_instrument(instrument.name, instrument.ticker)
+        return Ok()
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+@admin_router.delete("/instrument/{ticker}", response_model=Ok)
+async def delete_instrument(ticker: str):
+    try:
+        db_fnc.delete_instrument(ticker)
+    except Exception as e:
+        raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+
+@admin_router.post("/balance/deposit", response_model=Ok, tags=["admin", "balance"])
+async def update_balance(request: AlterBalanceRequest, is_deposit=True):
+    if not db_fnc.lookup('Users', 'id', str(request.user_id)):
+        raise HTTPException(status_code=422, detail='User not found')
+    try:
+        db_fnc.update_balance(request.user_id, request.ticker, request.amount, is_deposit)
+        return Ok()
+    except Exception as e:
+        if isinstance(e, ValueError):
+            raise HTTPException(status_code=422, detail=f'Unprocessable content: {e}')
+        else:
+            raise HTTPException(status_code=500, detail=f"Internal server error: {e}")
+
+
+@admin_router.post("/balance/withdraw", response_model=Ok, tags=["admin", "balance"])
+async def admin_withdraw(request: AlterBalanceRequest):
+    return await update_balance(request, is_deposit=False)
+
+app.include_router(admin_router)
+
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

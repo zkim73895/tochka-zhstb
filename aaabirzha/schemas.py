@@ -49,16 +49,12 @@ class InstrumentCreate(BaseModel):
 
 
 class Instrument(BaseModel):
-    id: Optional[int] = None
     name: str
     ticker: str
 
-    class Config:
-        from_attributes = True
-
 
 # Order schemas
-class MarketOrderCreate(BaseModel):
+class MarketOrderBody(BaseModel):
     direction: Direction
     ticker: str
     qty: int
@@ -74,28 +70,28 @@ class MarketOrder(BaseModel):
     id: UUID
     status: OrderStatus
     user_id: UUID
-    direction: Direction
-    ticker: str
-    qty: int
+    body: MarketOrderBody
     timestamp: datetime
 
     class Config:
         from_attributes = True
 
 
-class LimitOrderCreate(BaseModel):
+class LimitOrderBody(BaseModel):
     direction: Direction
     ticker: str
     qty: int
     price: int
 
     @field_validator('qty')
+    @classmethod
     def check_qty(cls, value):
         if value < 1:
             raise ValueError('Order quantity may not be less than 1')
         return value
 
     @field_validator('price')
+    @classmethod
     def check_price(cls, value):
         if value <= 0:
             raise ValueError('Price may not be 0 or negative')
@@ -106,23 +102,38 @@ class LimitOrder(BaseModel):
     id: UUID
     status: OrderStatus
     user_id: UUID
-    direction: Direction
-    ticker: str
-    qty: int
-    price: int
+    body: LimitOrderBody
     timestamp: datetime
+    filled: int = 0
 
     class Config:
         from_attributes = True
 
 
-# Message schemas for RabbitMQ
-class OrderMessage(BaseModel):
-    order_id: str
-    order_type: str  # "market" or "limit"
-    user_id: str
+class OrderType(IntEnum):
+    MARKET = 0
+    LIMIT = 1
+
+
+class Transaction(BaseModel):
     ticker: str
-    direction: Direction
-    qty: int
-    price: Optional[int] = None
+    amount: int
+    price: float
     timestamp: datetime
+
+
+class Ok(BaseModel):
+    success: bool = True
+
+
+class AlterBalanceRequest(BaseModel):
+    user_id: UUID
+    ticker: str
+    amount: int
+
+    @field_validator('amount')
+    @classmethod
+    def is_non_negative(cls, amount: int) -> int:
+        if amount < 0:
+            raise ValueError('Amount may not be negative')
+        return amount
