@@ -270,7 +270,7 @@ async def update_balance(request: AlterBalanceRequest, is_deposit=True):
 async def admin_withdraw(request: AlterBalanceRequest):
     return await update_balance(request, is_deposit=False)
 
-app.include_router(admin_router)
+app.include_router(public_router)
 
 
 
