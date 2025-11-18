@@ -115,11 +115,19 @@ class OrderType(IntEnum):
     LIMIT = 1
 
 
-class Transaction(BaseModel):
+class TransactionBody(BaseModel):
     ticker: str
-    amount: int
+    qty: int
     price: float
     timestamp: datetime
+
+
+class Transaction(BaseModel):
+    user_id: UUID
+    init_order: UUID
+    target_order: UUID
+    direction: Direction
+    body: TransactionBody
 
 
 class Ok(BaseModel):

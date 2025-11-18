@@ -10,7 +10,8 @@ import hmac
 
 #DB operations stored as functions
 import database as db_fnc
-from aaabirzha.schemas import OrderStatus
+from aaabirzha.matching_engine import execute_market_order, execute_limit_order
+from aaabirzha.schemas import OrderStatus, Direction
 
 # Pydantic models
 from schemas import (
@@ -52,8 +53,10 @@ def parse_token_header(header: str) -> str:
 async def get_current_user(header_value: Optional[str] = Depends(auth_header)) -> User:
     raw_key = parse_token_header(header_value)
     hashed_key = hash_api_key(raw_key)
+    print(raw_key + '\n' + hashed_key)
 
     rec = db_fnc.get_user_by_api_key(hashed_key)
+    print(rec)
     if not rec:
         raise HTTPException(status_code=401, detail="Invalid API key")
     if not secure_compare(rec["api_key_hashed"], hashed_key):
@@ -157,6 +160,7 @@ app.include_router(public_router)
 #Order endpoints
 order_router = APIRouter(prefix="/api/v1/order", tags=["order"], dependencies=[Depends(get_current_user)])
 
+
 @order_router.get('/')
 async def get_orders(current_user: User = Depends(get_current_user)):
     try:
@@ -179,7 +183,7 @@ async def create_order(create_request: Union[MarketOrderBody, LimitOrderBody], c
                 ),
                 timestamp=datetime.now()
             )
-            db_fnc.create_market_order(order)
+            await execute_market_order(order, current_user)
         else:
             order = LimitOrder(
                 id=uuid4(),
@@ -194,6 +198,7 @@ async def create_order(create_request: Union[MarketOrderBody, LimitOrderBody], c
                 timestamp=datetime.now()
             )
             db_fnc.create_limit_order(order)
+            await execute_limit_order(order, current_user)
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
     return {"success": True, "order_id": order.id}
@@ -211,6 +216,8 @@ async def calcel_order(order_id: str):
         db_fnc.cancel_order(order_id)
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
+
+app.include_router(order_router)
 
 
 #Admin endpoints, ADMIN user role dependency check included

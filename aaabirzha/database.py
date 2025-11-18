@@ -1,5 +1,12 @@
 import sqlite3 as sql
-from schemas import MarketOrder, LimitOrder, OrderType
+
+from pygame.display import update
+
+from aaabirzha.schemas import Direction
+from schemas import MarketOrder, LimitOrder, OrderType, OrderStatus
+from typing import Union
+
+
 conn = sql.connect('database.db')
 
 conn.execute('PRAGMA journal_mode=WAL;')
@@ -123,6 +130,20 @@ type: {'deposit' if is_deposit else 'withdraw'}''')
     cursor.close()
 
 
+def exchange_balance(buyer_id, seller_id, ticker, price: float, amount: int):
+    try:
+        conn.execute('BEGIN TRANSACTION')
+        update_balance(buyer_id, ticker, amount, True)
+        update_balance(seller_id, 'RUB', int(amount*price), True)
+        update_balance(seller_id, ticker, amount, False)
+        update_balance(buyer_id, 'RUB', int(amount * price), False)
+        conn.execute('COMMIT')
+
+    except sql.DatabaseError as e:
+        print(f'DBError: Failed to get all instruments\n{e}')
+        conn.execute('ROLLBACK')
+
+
 def lookup(table, key, val):
     cursor = conn.cursor()
     query = f'''
@@ -217,6 +238,7 @@ def trim_order(order, keep_type=False):
 
     return order
 
+
 def get_orders_for_user(user_id, ticker=None):
     cursor = conn.cursor()
     query = f'''
@@ -239,6 +261,28 @@ WHERE id = ?'''
         return trim_order(cursor.fetchone())
     except sql.DatabaseError as e:
         print(f'DBError: Failed to fetch order {order_id}\n{e}')
+
+
+def get_offers_by_ticker(ticker: str, direction: Direction, price: float = 10000000000000000):
+    cursor = conn.cursor()
+    query = f'''
+SELECT * FROM Orders
+WHERE ticker = ? AND direction = ?
+AND price <= ?
+AND state IN (0, 2)
+ORDER BY price ASC, timestamp ASC'''
+    sum_query = f'''
+SELECT sum(qty) - sum(filled) FROM Orders
+WHERE ticker =? AND direction = ?
+AND price <= ? AND state IN (0, 2)'''
+    try:
+        cursor.execute(query, (ticker, int(direction), price))
+        offers = [trim_order(order) for order in cursor.fetchall()]
+        cursor.execute(sum_query, (ticker, int(direction), price))
+        total_qty = cursor.fetchone()
+        return offers, total_qty
+    except sql.DatabaseError as e:
+        print(f'DBError: Failed to get offers for ticker {ticker} and direction {direction}\n{e}')
 
 
 def cancel_order(order_id):
@@ -275,6 +319,30 @@ VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, {OrderType.LIMIT})'''
                                order.qty, order.price, order.filled))
     except sql.DatabaseError as e:
         print(f'DBError: Failed to create order: {order.model_dump()}\n{e}')
+
+
+def update_order_status(order: Union[MarketOrder, LimitOrder], new_status: OrderStatus):
+    cursor = conn.cursor()
+    query = f'''
+UPDATE Orders
+SET status = ?
+WHERE id = ?'''
+    try:
+        cursor.execute(query, (new_status, order.id))
+    except sql.DatabaseError as e:
+        print(f'DBError: Failed to update order {order.id} status to {new_status}\n{e}')
+
+
+def decrease_order_qty(order: Union[MarketOrder, LimitOrder], decrement: int):
+    cursor = conn.cursor()
+    query = f'''
+UPDATE Orders
+SET qty = qty - ?
+WHERE id = ?'''
+    try:
+        cursor.execute(query, (decrement, order.id))
+    except sql.DatabaseError as e:
+        print(f'DBError: Failed to decrement order {order.id} qty by {decrement}\n{e}')
 
 
 def get_transactions_by_user(user_id, ticker=None):
