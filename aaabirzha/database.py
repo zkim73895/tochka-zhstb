@@ -1,5 +1,6 @@
 import sqlite3 as sql
 import logging
+from gc import unfreeze
 
 from aaabirzha.schemas import Direction
 from schemas import MarketOrder, LimitOrder, OrderType, OrderStatus
@@ -10,19 +11,28 @@ conn = sql.connect('database.db')
 
 conn.execute('PRAGMA journal_mode=WAL;')
 
+with open('Fresh_create_DB.sql', 'r') as freshstart_sql:
+    freshstart_script = freshstart_sql.read()
+
 main_cursor = conn.cursor()
+
+main_cursor.executescript(freshstart_script)
 
 logger = logging.getLogger(__name__)
 
 
 def create_user(id, name, role, api_key_hashed, api_key=None):
     cursor = conn.cursor()
-    query = f'''
+    users_query = f'''
     INSERT INTO Users (id, name, role, api_key_hashed, api_key)
     VALUES (?, ?, ?, ?, ?);
     '''
+    userbalance_query = f'''
+INSERT INTO UserBalance (user_id, ticker)
+VALUES (?, 'RUB')'''
     try:
-        cursor.execute(query, (str(id), name, int(role), api_key_hashed, api_key))
+        cursor.execute(users_query, (str(id), name, int(role), api_key_hashed, api_key))
+        cursor.execute(userbalance_query, (str(id),))
     except Exception as e:
         logger.error(e)
     logger.info(f'User {name} created successfully')
@@ -52,8 +62,9 @@ def delete_instrument(ticker):
     query = '''
     DELETE FROM Instruments
     WHERE ticker = ?'''
+    logger.debug(f'Delete query:{query}')
     try:
-        cursor.execute(query, (ticker))
+        cursor.execute(query, (ticker,))
         logger.info(f'Instrument {ticker} deleted')
         conn.commit()
     except sql.DatabaseError as e:
@@ -93,56 +104,60 @@ def new_ticker(user_id, ticker):
     cursor.close()
 
 
-def update_balance(user_id, ticker, amount: int, is_deposit: bool):
+def update_balance(user_id, ticker, amount: float, is_freeze=False):
     cursor = conn.cursor()
     user_id = str(user_id)
 
     logger.debug(f'''user_id:{user_id}
 ticker: {ticker}
 amount: {amount}
-type: {'deposit' if is_deposit else 'withdraw'}''')
+type: {'deposit' if amount >= 0 else 'withdraw'}
+is freeze: {is_freeze}''')
 
-    balance = lookup_balance(user_id, ticker)
+    balance = lookup_balance(user_id, ticker)['balance']
 
     logger.debug(f'Balance: {balance}')
 
     if not balance:
         logger.info(f'User {user_id} does not have a {ticker} balance')
-        if is_deposit:
+        if amount >= 0:
             new_ticker(user_id, ticker)
             logger.info(f'{ticker} balance created')
-    if not is_deposit:
-        if amount > balance:
-            return ValueError("Cannot withdraw more than the current balance")
-        amount = 0 - amount
-    query = '''
+    if amount < 0:
+        if balance + amount < 0:
+            raise ValueError(f"Cannot {"freeze" if is_freeze else "withdraw"} more than the current balance")
+
+    column = "frozen" if is_freeze else "balance"
+    query = f'''
     UPDATE UserBalance 
-    SET balance = balance + ?
+    SET {column} = {column} + ?
     WHERE user_id = ? AND ticker = ?
     '''
     try:
         cursor.execute(query, (amount, user_id, ticker))
-        logger.info(f'''Transaction made. Type is deposit: {is_deposit}
+        logger.info(f'''Transaction made. Type is deposit: {amount >= 0}
         User: {user_id}
-        Ticker {ticker} balance updated from {balance} to {balance + amount}''')
+        {f'Ticker {ticker} balance updated from {balance} to {balance + amount}'
+        if not is_freeze else
+        f'Ticker {ticker} frozen value changed by {amount}'}''')
         conn.commit()
     except sql.DatabaseError as e:
         logger.error(f'Failed to add ticker {ticker} to user {user_id}\n{e}')
     cursor.close()
 
 
-def exchange_balance(buyer_id, seller_id, ticker, price: float, amount: int):
+def exchange_balance(buyer_id, seller_id, ticker, price: float, amount: float):
     try:
-        conn.execute('BEGIN TRANSACTION')
-        update_balance(buyer_id, ticker, amount, True)
-        update_balance(seller_id, 'RUB', int(amount*price), True)
-        update_balance(seller_id, ticker, amount, False)
-        update_balance(buyer_id, 'RUB', int(amount * price), False)
-        conn.execute('COMMIT')
+        # conn.execute('BEGIN TRANSACTION')
+        update_balance(buyer_id, ticker, amount, False)
+        update_balance(seller_id, 'RUB', amount * price, False)
+        update_balance(seller_id, ticker, -amount, False)
+        update_balance(buyer_id, 'RUB', -amount * price, False)
+        # conn.execute('COMMIT')
 
     except sql.DatabaseError as e:
-        logger.error(f'DBError: Failed to get all instruments\n{e}')
-        conn.execute('ROLLBACK')
+        logger.error(f'DBError: Failed to exchange balances\n{e}')
+        # conn.execute('ROLLBACK')
 
 
 def lookup(table, key, val):
@@ -150,24 +165,29 @@ def lookup(table, key, val):
     query = f'''
     SELECT * FROM {table} WHERE {key} = ?
     '''
-    cursor.execute(query, (val,))
-    result = cursor.fetchone()
+    logger.debug(f'db_fnc.lookup query:{query}')
+    data = cursor.execute(query, (val,))
+    columns = data.description
+    result = jsonify([column[0] for column in columns], cursor.fetchone())
+    logger.debug(f'db_fnc.lookup result:{result}')
     cursor.close()
     return result
 
 
-def lookup_balance(user_id, ticker=None):
+def lookup_balance(user_id, ticker=None, available_only=False) -> dict:
     cursor = conn.cursor()
 
     #If no ticker is specified, returns all tickers for the user
     if not ticker:
         query = f'''
-SELECT ticker, balance FROM UserBalance
+SELECT ticker, balance{'- frozen' if available_only else ''} 
+FROM UserBalance
 WHERE user_id = ?'''
         logger.info(f'Trying to look up balance of all instruments for user {user_id}')
 
         cursor.execute(query, (user_id,))
-        response = cursor.fetchall()
+        response = [jsonify(['ticker', 'balance'], row) for row in cursor.fetchall()]
+        cursor.close()
         return response
 
     query = f'''
@@ -178,7 +198,7 @@ WHERE user_id = ?'''
     logger.info(f'Trying to look up {ticker} balance for {user_id}\nQuery:\n{query}')
 
     cursor.execute(query, (user_id, ticker))
-    response = cursor.fetchone()
+    response = jsonify(['balance'], cursor.fetchone())
 
     logger.debug(f'Response: {response}')
 
@@ -206,7 +226,7 @@ WHERE user_id = ?'''
 
         logger.info(f'Trying to delete user {user_id}\nQuery:\n{query1}')
         cursor.execute(query1, (user_id,))
-
+        conn.commit()
         cursor.close()
         return user
     except sql.DatabaseError as e:
@@ -249,15 +269,26 @@ def trim_order(order, keep_type=False):
 
     return order
 
+order_fields = ['id', 'status', 'user_id', 'timestamp', 'direction',
+                        'ticker', 'qty', 'price', 'filled', 'type']
+
+
+def quotify_ticker(ticker: str):
+    ticker = ticker.replace('"', '').replace("'", '')
+    return f'"{ticker}"'
+
 
 def get_orders_for_user(user_id, ticker=None):
     cursor = conn.cursor()
+    if ticker:
+        ticker = quotify_ticker(ticker)
     query = f'''
 SELECT * FROM Orders
 WHERE user_id = ?{f' AND ticker = {ticker}' if ticker else ''}'''
+    logger.debug(f'Trying to get orders for user {user_id}. Query:{query}')
     try:
         cursor.execute(query, (str(user_id),))
-        response = [trim_order(order) for order in cursor.fetchall()]
+        response = [trim_order(jsonify(order_fields, order)) for order in cursor.fetchall()]
         cursor.close()
         return response
     except sql.DatabaseError as e:
@@ -274,7 +305,7 @@ WHERE id = ?'''
     try:
         cursor.execute(query, (order_id,))
         cursor.close()
-        return trim_order(cursor.fetchone())
+        return jsonify(order_fields, trim_order(cursor.fetchone()))
     except sql.DatabaseError as e:
         logger.error(f'DBError: Failed to fetch order {order_id}\n{e}')
         cursor.close()
@@ -287,18 +318,20 @@ def get_offers_by_ticker(ticker: str, direction: Direction, price: float = 10000
 SELECT * FROM Orders
 WHERE ticker = ? AND direction = ?
 AND price <= ?
-AND state IN (0, 2)
+AND status IN (0, 2)
 ORDER BY price ASC, timestamp ASC'''
     sum_query = f'''
 SELECT sum(qty) - sum(filled) FROM Orders
 WHERE ticker =? AND direction = ?
-AND price <= ? AND state IN (0, 2)'''
+AND price <= ? AND status IN (0, 2)'''
     try:
         cursor.execute(query, (ticker, int(direction), price))
-        offers = [trim_order(order) for order in cursor.fetchall()]
+        offers = [trim_order(jsonify(order_fields, order)) for order in cursor.fetchall()]
         cursor.execute(sum_query, (ticker, int(direction), price))
-        total_qty = cursor.fetchone()
+        total_qty = jsonify(['value'], cursor.fetchone())
+        total_qty = total_qty if total_qty['value'] is not None else {'value': 0}
         cursor.close()
+        logger.debug(offers)
         return offers, total_qty
     except sql.DatabaseError as e:
         logger.error(f'DBError: Failed to get offers for ticker {ticker} and direction {direction}\n{e}')
@@ -321,14 +354,16 @@ WHERE id = ?'''
         raise e
 
 
-def create_market_order(order: MarketOrder):
+def create_market_order(order: MarketOrder, user_id: str):
     cursor = conn.cursor()
     query = f'''
 INSERT INTO Orders
 (id, status, user_id, timestamp, direction, ticker, qty, type)
-VALUES (?, ?, ?, ?, ?, ?, ?, {OrderType.MARKET})'''
+VALUES (?, ?, ?, ?, ?, ?, ?, {OrderType.MARKET.value})'''
     try:
-        cursor.execute(query, (order.id, order.status, order.timestamp, order.direction, order.ticker, order.qty))
+        cursor.execute(query, (str(order.id), order.status.value, str(user_id), order.timestamp,
+                               order.body.direction.value, order.body.ticker, order.body.qty))
+        conn.commit()
         cursor.close()
         return True
     except sql.DatabaseError as e:
@@ -337,15 +372,16 @@ VALUES (?, ?, ?, ?, ?, ?, ?, {OrderType.MARKET})'''
         raise e
 
 
-def create_limit_order(order: LimitOrder):
+def create_limit_order(order: LimitOrder, user_id: str):
     cursor = conn.cursor()
     query = f'''
-INSERT INTO LimitOrders
+INSERT INTO Orders
 (id, status, user_id, timestamp, direction, ticker, qty, price, filled, type)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, {OrderType.LIMIT})'''
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, {OrderType.LIMIT.value})'''
     try:
-        cursor.execute(query, (order.id, order.status, order.timestamp, order.direction, order.ticker,
-                               order.qty, order.price, order.filled))
+        cursor.execute(query, (str(order.id), order.status.value, str(user_id), order.timestamp, order.body.direction.value,
+                               order.body.ticker, order.body.qty, order.body.price, order.filled))
+        conn.commit()
         cursor.close()
         return True
     except sql.DatabaseError as e:
@@ -361,7 +397,8 @@ UPDATE Orders
 SET status = ?
 WHERE id = ?'''
     try:
-        cursor.execute(query, (new_status, order.id))
+        cursor.execute(query, (new_status.value, str(order.id)))
+        conn.commit()
         cursor.close()
         return True
     except sql.DatabaseError as e:
@@ -370,31 +407,44 @@ WHERE id = ?'''
         raise e
 
 
-def decrease_order_qty(order: Union[MarketOrder, LimitOrder], decrement: int):
+def fill_order(order: Union[MarketOrder, LimitOrder], amount: int):
     cursor = conn.cursor()
-    query = f'''
+    fill_query = f'''
 UPDATE Orders
-SET qty = qty - ?
+SET filled = filled + ?
 WHERE id = ?'''
+    unfreeze_query = f'''
+UPDATE UserBalance
+SET frozen = frozen - ?
+WHERE user_id = ?
+AND ticker = ?'''
+    update_balance(order.user_id, order.body.ticker, -amount, True)
     try:
-        cursor.execute(query, (decrement, order.id))
+        cursor.execute(fill_query, (amount, str(order.id)))
+        # cursor.execute(unfreeze_query, (amount*order.body.price, str(order.user_id), order.body.ticker))
+        conn.commit()
         cursor.close()
         return True
     except sql.DatabaseError as e:
-        logger.error(f'DBError: Failed to decrement order {order.id} qty by {decrement}\n{e}')
+        logger.error(f'DBError: Failed to increase order {order.id} filled field by {amount}\n{e}')
         cursor.close()
         raise e
 
+transaction_fields = ['id', 'user_id', 'ticker', 'direction',
+                      'amount', 'price', 'timestamp']
 
 def get_transactions_by_user(user_id, ticker=None):
     cursor = conn.cursor()
+    if ticker:
+        ticker = quotify_ticker(ticker)
     query = f'''
 SELECT * FROM Transactions
 WHERE user_id = ?{f' AND ticker = {ticker}'}'''
     try:
-        cursor.execute(query, (user_id,))
+        cursor.execute(query, (str(user_id),))
+        response = [jsonify(transaction_fields, transaction) for transaction in cursor.fetchall()]
         cursor.close()
-        return cursor.fetchall()
+        return response
     except sql.DatabaseError as e:
         logger.error(f'DBError: Failed to get transactions for user {user_id} {'and ticker ' +ticker if ticker else ''}\n{e}')
         cursor.close()

@@ -7,16 +7,25 @@ from re import fullmatch
 
 
 # Enums
-class Direction(str, Enum):
-    BUY = "BUY"
-    SELL = "SELL"
+class Direction(IntEnum):
+    BUY = 0
+    SELL = 1
+
+    @classmethod
+    def from_str(cls, string):
+        return cls(0 if string == 'BUY' else 1)
 
 
-class OrderStatus(str, Enum):
-    NEW = "NEW"
-    EXECUTED = "EXECUTED"
-    PART_EXECUTED = "PART_EXECUTED"
-    CANCELLED = "CANCELLED"
+class OrderStatus(IntEnum):
+    NEW = 0
+    EXECUTED = 1
+    PART_EXECUTED = 2
+    CANCELLED = 3
+
+    @classmethod
+    def from_str(cls, string):
+        val_list = ['NEW', 'EXECUTED', 'PART_EXECUTED', 'CANCELLED']
+        return val_list.index(string)
 
 
 class UserRole(IntEnum):
@@ -59,11 +68,17 @@ class MarketOrderBody(BaseModel):
     ticker: str
     qty: int
 
+    model_config = {"union_mode": "smart"}
+
     @field_validator('qty')
     def check_qty(cls, value):
         if value < 1:
             raise ValueError('Order quantity may not be less than 1')
         return value
+
+    @field_validator('direction', mode="before")
+    def convert_direction(cls, value):
+        return Direction.from_str(value)
 
 
 class MarketOrder(BaseModel):
@@ -83,6 +98,8 @@ class LimitOrderBody(BaseModel):
     qty: int
     price: int
 
+    model_config = {"union_mode": "smart"}
+
     @field_validator('qty')
     @classmethod
     def check_qty(cls, value):
@@ -97,6 +114,12 @@ class LimitOrderBody(BaseModel):
             raise ValueError('Price may not be 0 or negative')
         return value
 
+    @field_validator('direction', mode="before")
+    def convert_direction(cls, value):
+        if isinstance(value, str):
+            return Direction.from_str(value)
+        else:
+            return value
 
 class LimitOrder(BaseModel):
     id: UUID
