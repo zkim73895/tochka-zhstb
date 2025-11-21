@@ -114,15 +114,18 @@ amount: {amount}
 type: {'deposit' if amount >= 0 else 'withdraw'}
 is freeze: {is_freeze}''')
 
-    balance = lookup_balance(user_id, ticker)['balance']
+    balance = lookup_balance(user_id, ticker)
 
     logger.debug(f'Balance: {balance}')
 
-    if not balance:
+    if balance is None:
         logger.info(f'User {user_id} does not have a {ticker} balance')
         if amount >= 0:
             new_ticker(user_id, ticker)
+            balance = 0
             logger.info(f'{ticker} balance created')
+    else:
+        balance = balance['balance']
     if amount < 0:
         if balance + amount < 0:
             raise ValueError(f"Cannot {"freeze" if is_freeze else "withdraw"} more than the current balance")
@@ -143,6 +146,7 @@ is freeze: {is_freeze}''')
         conn.commit()
     except sql.DatabaseError as e:
         logger.error(f'Failed to add ticker {ticker} to user {user_id}\n{e}')
+        raise e
     cursor.close()
 
 
@@ -191,14 +195,17 @@ WHERE user_id = ?'''
         return response
 
     query = f'''
-    SELECT balance FROM UserBalance 
+    SELECT balance{'- frozen' if available_only else ''} 
+    FROM UserBalance 
     WHERE user_id = ? AND ticker = ?
     '''
 
     logger.info(f'Trying to look up {ticker} balance for {user_id}\nQuery:\n{query}')
 
     cursor.execute(query, (user_id, ticker))
-    response = jsonify(['balance'], cursor.fetchone())
+    response = cursor.fetchone()
+    if response:
+        response = jsonify(['balance'], response)
 
     logger.debug(f'Response: {response}')
 
@@ -211,15 +218,15 @@ def delete_user(user_id):
 
     query = f'''
 SELECT * FROM Users
-WHERE user_id = ?'''
+WHERE id = ?'''
 
     query1 = f'''
 DELETE FROM Users
-WHERE user_id = ?'''
+WHERE id = ?'''
 
     try:
         cursor.execute(query, (user_id,))
-        user = cursor.fetchone()
+        user = jsonify(['id', 'name', 'role', 'api_key'], cursor.fetchone())
         if not user:
             logger.error('User not found')
             raise Exception(f"Cannot delete a non-existent user:\nUser {user_id} not found in the database")
@@ -299,13 +306,21 @@ WHERE user_id = ?{f' AND ticker = {ticker}' if ticker else ''}'''
 
 def get_order_by_id(order_id):
     cursor = conn.cursor()
+    logger.info(f'Trying to get order by ID: {order_id}')
     query = f'''
 SELECT * FROM Orders
 WHERE id = ?'''
     try:
         cursor.execute(query, (order_id,))
+        response = cursor.fetchone()
+        logger.debug(f'Order fetched 1:{response}')
+        if response:
+            response = trim_order(jsonify(order_fields, response))
+        else:
+            return None
+        logger.debug(f'Order fetched 2:{response}')
         cursor.close()
-        return jsonify(order_fields, trim_order(cursor.fetchone()))
+        return response
     except sql.DatabaseError as e:
         logger.error(f'DBError: Failed to fetch order {order_id}\n{e}')
         cursor.close()
@@ -339,17 +354,31 @@ AND price <= ? AND status IN (0, 2)'''
         raise e
 
 
-def cancel_order(order_id):
+def cancel_order(order_id: str, user):
     cursor = conn.cursor()
+    logger.info(f'Trying to delete order ID {order_id}')
     query = f'''
-DELETE FROM Orders
+UPDATE Orders
+SET status = 3
 WHERE id = ?'''
     try:
+        order = get_order_by_id(order_id)
+        if order['user_id'] != str(user.id):
+            logger.error(f"You can only cancel your own orders!\nExpected:{order['user_id']}\nReceived:{user.id}")
+            raise ValueError('You can only cancel your own orders!')
+        frozen = order['qty'] - order['filled']
+        frozen_ticker = order['ticker']
+        if order['direction'] == Direction.BUY:
+            frozen *= order['price']
+            frozen_ticker = 'RUB'
+
         cursor.execute(query, (order_id,))
+
+        update_balance(str(user.id), frozen_ticker, -frozen, True)
         cursor.close()
         return True
     except sql.DatabaseError as e:
-        logger.error(f'DBError: Failed to calcel order {order_id}\n{e}')
+        logger.error(f'DBError: Failed to cancel order {order_id}\n{e}')
         cursor.close()
         raise e
 

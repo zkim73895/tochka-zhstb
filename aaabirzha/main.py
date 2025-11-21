@@ -219,14 +219,24 @@ async def create_order(create_request: Union[LimitOrderBody, MarketOrderBody], c
 @order_router.get('/{order_id}', response_model=Union[MarketOrder, LimitOrder])
 async def get_order_details(order_id: str):
     try:
-        return db_fnc.get_order_by_id(quotify_param(order_id))
+        response = db_fnc.get_order_by_id(order_id)
+        body = {
+            'direction': response.pop('direction'),
+            'ticker': response.pop('ticker'),
+            'qty': response.pop('qty')
+        }
+        if 'price' in response.keys():
+            body['price'] = response.pop('price')
+        response['body'] = body
+        return response
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
 @order_router.delete('/{order_id}', response_model=Ok)
-async def calcel_order(order_id: str):
+async def cancel_order(order_id: str, current_user: User = Depends(get_current_user)):
     try:
-        db_fnc.cancel_order(quotify_param(order_id))
+        db_fnc.cancel_order(str(order_id), current_user)
+        return Ok
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
@@ -235,14 +245,13 @@ app.include_router(order_router)
 
 #Admin endpoints, ADMIN user role dependency check included
 admin_router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends(require_role(UserRole.ADMIN))])
-# admin_router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 @admin_router.delete("/user/{user_id}", response_model=User, tags=["admin", "user"])
 async def delete_user(user_id: UUID):
     try:
-        user_data = db_fnc.delete_user(quotify_param(str(user_id)))
+        user_data = db_fnc.delete_user(str(user_id))
         user = User(
-            id=user_data['user_id'],
+            id=user_data['id'],
             name=user_data['name'],
             role=user_data['role'],
             api_key=user_data['api_key']
@@ -274,11 +283,11 @@ async def delete_instrument(ticker: str):
 
 
 @admin_router.post("/balance/deposit", response_model=Ok, tags=["admin", "balance"])
-async def update_balance(request: AlterBalanceRequest, is_deposit=True):
+async def update_balance(request: AlterBalanceRequest):
     if not db_fnc.lookup('Users', 'id', str(request.user_id)):
         raise HTTPException(status_code=422, detail='User not found')
     try:
-        db_fnc.update_balance(request.user_id, request.ticker, request.amount, is_deposit)
+        db_fnc.update_balance(request.user_id, request.ticker, request.amount, False)
         return Ok()
     except Exception as e:
         if isinstance(e, ValueError):
@@ -289,7 +298,8 @@ async def update_balance(request: AlterBalanceRequest, is_deposit=True):
 
 @admin_router.post("/balance/withdraw", response_model=Ok, tags=["admin", "balance"])
 async def admin_withdraw(request: AlterBalanceRequest):
-    return await update_balance(request, is_deposit=False)
+    request.amount *= -1
+    return await update_balance(request)
 
 app.include_router(admin_router)
 
