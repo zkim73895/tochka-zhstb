@@ -1,36 +1,51 @@
+from typing import List
+
 from pydantic import BaseModel, field_validator
-from enum import Enum, IntEnum
+from enum import Enum, IntEnum, StrEnum
 from datetime import datetime
 from uuid import UUID
-from typing import Optional
 from re import fullmatch
 
 
 # Enums
-class Direction(IntEnum):
-    BUY = 0
-    SELL = 1
+class Direction(StrEnum):
+    BUY = "BUY"
+    SELL = "SELL"
 
     @classmethod
-    def from_str(cls, string):
-        return cls(0 if string == 'BUY' else 1)
+    def from_int(cls, v):
+        return cls("BUY" if v == 0 else "SELL")
+    @classmethod
+    def to_int(cls, v):
+        return v == "SELL"
 
 
-class OrderStatus(IntEnum):
-    NEW = 0
-    EXECUTED = 1
-    PART_EXECUTED = 2
-    CANCELLED = 3
+class OrderStatus(StrEnum):
+    NEW = "NEW"
+    EXECUTED = "EXECUTED"
+    PART_EXECUTED = "PART_EXECUTED"
+    CANCELLED = "CANCELLED"
 
     @classmethod
-    def from_str(cls, string):
+    def from_int(cls, v):
         val_list = ['NEW', 'EXECUTED', 'PART_EXECUTED', 'CANCELLED']
-        return val_list.index(string)
+        return cls(val_list[v])
+    @classmethod
+    def to_int(cls, v):
+        val_list = ['NEW', 'EXECUTED', 'PART_EXECUTED', 'CANCELLED']
+        return val_list.index(v)
 
 
-class UserRole(IntEnum):
-    USER = 0
-    ADMIN = 1
+class UserRole(StrEnum):
+    USER = "USER"
+    ADMIN = "ADMIN"
+
+    @classmethod
+    def from_int(cls, v):
+        return cls("ADMIN" if v == 1 else "USER")
+    @classmethod
+    def to_int(cls, v):
+        return 0 if v == "USER" else 1
 
 
 # User schemas
@@ -76,9 +91,9 @@ class MarketOrderBody(BaseModel):
             raise ValueError('Order quantity may not be less than 1')
         return value
 
-    @field_validator('direction', mode="before")
-    def convert_direction(cls, value):
-        return Direction.from_str(value)
+    # @field_validator('direction', mode="before")
+    # def convert_direction(cls, value):
+    #     return Direction.from_str(value)
 
 
 class MarketOrder(BaseModel):
@@ -114,12 +129,12 @@ class LimitOrderBody(BaseModel):
             raise ValueError('Price may not be 0 or negative')
         return value
 
-    @field_validator('direction', mode="before")
-    def convert_direction(cls, value):
-        if isinstance(value, str):
-            return Direction.from_str(value)
-        else:
-            return value
+    # @field_validator('direction', mode="before")
+    # def convert_direction(cls, value):
+    #     if isinstance(value, str):
+    #         return Direction.from_str(value)
+    #     else:
+    #         return value
 
 class LimitOrder(BaseModel):
     id: UUID
@@ -133,9 +148,16 @@ class LimitOrder(BaseModel):
         from_attributes = True
 
 
-class OrderType(IntEnum):
-    MARKET = 0
-    LIMIT = 1
+class OrderType(StrEnum):
+    MARKET = "MARKET"
+    LIMIT = "LIMIT"
+
+    @classmethod
+    def from_int(cls, v):
+        return cls("LIMIT" if v == 1 else "MARKET")
+    @classmethod
+    def to_int(cls, v):
+        return 0 if v == "MARKET" else 1
 
 
 class TransactionBody(BaseModel):
@@ -168,3 +190,12 @@ class AlterBalanceRequest(BaseModel):
         if amount < 0:
             raise ValueError('Amount may not be negative')
         return amount
+
+
+class Level(BaseModel):
+    price: float
+    qty: float
+
+class L2OrderBook(BaseModel):
+    bid_levels: List[Level]
+    ask_levels: List[Level]
