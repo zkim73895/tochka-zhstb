@@ -10,10 +10,9 @@ import hmac
 import logging
 
 #DB operations stored as functions
-import database as db_fnc
-from aaabirzha.database import quotify_ticker
+import aaabirzha.database as db_fnc
 from aaabirzha.matching_engine import execute_market_order, execute_limit_order
-from aaabirzha.schemas import OrderStatus, Direction
+from aaabirzha.schemas import OrderStatus, Direction, L2OrderBook, Level
 
 # Pydantic models
 from schemas import (
@@ -70,7 +69,7 @@ async def get_current_user(header_value: Optional[str] = Depends(auth_header)) -
     if not secure_compare(rec["api_key"], hashed_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
-    return User(id=rec["id"], name=rec["name"], role=rec["role"], api_key = hashed_key if USE_HASHED_API_KEYS else raw_key)
+    return User(id=rec["id"], name=rec["name"], role=UserRole.from_int(rec["role"]), api_key = hashed_key if USE_HASHED_API_KEYS else raw_key)
 
 # Role-checking dependency factory
 def require_role(required_role: UserRole):
@@ -85,6 +84,25 @@ def require_role(required_role: UserRole):
 def quotify_param(param: str) -> str:
     param = param.replace('"', '').replace("'", '')
     return f'"{param}"'
+
+def db_response_to_order_dict(data: {}) -> {}:
+    response = {
+        'id': data['id'],
+        'status': OrderStatus.from_int(data['status']),
+        'user_id': data['user_id'],
+        'timestamp': data['timestamp'],
+        'body': {
+            'direction': Direction.from_int(data['direction']),
+            'ticker': data['ticker'],
+            'qty': data['qty']
+        }
+    }
+    if 'price' in data.keys():
+        response['body']['price'] = data['price']
+    if 'filled' in data.keys():
+        response['filled'] = data['filled']
+    return response
+
 
 # Basic routes
 @app.get("/")
@@ -111,7 +129,7 @@ async def create_user(data: UserCreate):
             name=data.name,
             api_key=hashed_key if USE_HASHED_API_KEYS else raw_key
         )
-        db_fnc.create_user(user.id, user.name, user.role, hashed_key, None if USE_HASHED_API_KEYS else raw_key)
+        db_fnc.create_user(user.id, user.name, UserRole.to_int(user.role), hashed_key, None if USE_HASHED_API_KEYS else raw_key)
         return user
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
@@ -131,13 +149,18 @@ async def get_instruments():
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
 
-@public_router.get("/orderbook/{ticker}", response_model=List[Union[MarketOrder, LimitOrder]])
-async def get_orderbook(ticker: str, limit: int = 10, current_user: User = Depends(get_current_user)):
+@public_router.get("/orderbook/{ticker}", response_model=L2OrderBook)
+async def get_orderbook(ticker: str, limit: int = 10):
     try:
-        orderbook = [MarketOrder(order) if 'price' in order.keys() else LimitOrder(order)
-                     for order in db_fnc.get_orders_for_user(current_user.id, ticker=quotify_param(ticker))]
-        limit = min(limit, len(orderbook))
-        return orderbook[:limit]
+        orders = db_fnc.get_orders_for_ticker(ticker)
+        orderbook = L2OrderBook(ask_levels=[], bid_levels=[])
+        for order in orders:
+            data = {'price': order['price'], 'qty': order['qty'] - order['filled']}
+            if order['direction'] == 0 and len(orderbook.ask_levels) < limit:
+                orderbook.ask_levels.append(Level(**data))
+            elif len(orderbook.bid_levels) < limit:
+                orderbook.bid_levels.append(Level(**data))
+        return orderbook
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
@@ -177,7 +200,7 @@ order_router = APIRouter(prefix="/api/v1/order", tags=["order"], dependencies=[D
 @order_router.get('/')
 async def get_orders(current_user: User = Depends(get_current_user)):
     try:
-        return db_fnc.get_orders_for_user(str(current_user.id))
+        return list(map(db_response_to_order_dict, db_fnc.get_orders_for_user(str(current_user.id))))
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
@@ -219,15 +242,15 @@ async def create_order(create_request: Union[LimitOrderBody, MarketOrderBody], c
 @order_router.get('/{order_id}', response_model=Union[MarketOrder, LimitOrder])
 async def get_order_details(order_id: str):
     try:
-        response = db_fnc.get_order_by_id(order_id)
-        body = {
-            'direction': response.pop('direction'),
-            'ticker': response.pop('ticker'),
-            'qty': response.pop('qty')
-        }
-        if 'price' in response.keys():
-            body['price'] = response.pop('price')
-        response['body'] = body
+        response = db_response_to_order_dict(db_fnc.get_order_by_id(order_id))
+        # body = {
+        #     'direction': Direction.from_int(response.pop('direction')),
+        #     'ticker': response.pop('ticker'),
+        #     'qty': response.pop('qty')
+        # }
+        # if 'price' in response.keys():
+        #     body['price'] = response.pop('price')
+        # response['body'] = body
         return response
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
@@ -253,7 +276,7 @@ async def delete_user(user_id: UUID):
         user = User(
             id=user_data['id'],
             name=user_data['name'],
-            role=user_data['role'],
+            role=UserRole.from_int(user_data['role']),
             api_key=user_data['api_key']
         )
         return user

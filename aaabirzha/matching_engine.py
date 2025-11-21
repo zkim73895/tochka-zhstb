@@ -1,7 +1,7 @@
 from aaabirzha.schemas import LimitOrderBody, OrderStatus
-from schemas import (MarketOrder, LimitOrder, Direction,
+from aaabirzha.schemas import (MarketOrder, LimitOrder, Direction,
                      TransactionBody, Transaction, User)
-import database as db_fnc
+import aaabirzha.database as db_fnc
 from datetime import datetime
 import logging
 
@@ -20,10 +20,10 @@ async def execute_market_order(order: MarketOrder, user: User):
         try:
             offer_order = LimitOrder(
                 id = offer['id'],
-                status = OrderStatus(offer['status']),
+                status = OrderStatus.from_int(offer['status']),
                 user_id = offer['user_id'],
                 body = {
-                    'direction': Direction(offer['direction']),
+                    'direction': Direction.from_int(offer['direction']),
                     'ticker': offer['ticker'],
                     'qty': offer['qty'],
                     'price': offer['price']
@@ -84,10 +84,10 @@ async def execute_limit_order(order: LimitOrder, user: User):
         for offer in offers:
             offer_order = LimitOrder(
                 id=offer['id'],
-                status=offer['status'],
+                status=OrderStatus.from_int(offer['status']),
                 user_id=offer['user_id'],
                 body = {
-                        'direction': Direction(offer['direction']),
+                        'direction': Direction.from_int(offer['direction']),
                         'ticker': offer['ticker'],
                         'qty': offer['qty'],
                         'price': offer['price']

@@ -1,9 +1,7 @@
 import sqlite3 as sql
 import logging
-from gc import unfreeze
 
-from aaabirzha.schemas import Direction
-from schemas import MarketOrder, LimitOrder, OrderType, OrderStatus
+from aaabirzha.schemas import Direction, MarketOrder, LimitOrder, OrderType, OrderStatus, UserRole
 from typing import Union
 
 
@@ -152,16 +150,13 @@ is freeze: {is_freeze}''')
 
 def exchange_balance(buyer_id, seller_id, ticker, price: float, amount: float):
     try:
-        # conn.execute('BEGIN TRANSACTION')
         update_balance(buyer_id, ticker, amount, False)
         update_balance(seller_id, 'RUB', amount * price, False)
         update_balance(seller_id, ticker, -amount, False)
         update_balance(buyer_id, 'RUB', -amount * price, False)
-        # conn.execute('COMMIT')
 
     except sql.DatabaseError as e:
         logger.error(f'DBError: Failed to exchange balances\n{e}')
-        # conn.execute('ROLLBACK')
 
 
 def lookup(table, key, val):
@@ -268,7 +263,7 @@ WHERE {api_key_column} = ?'''
 
 
 def trim_order(order, keep_type=False):
-    if OrderType(order['type']) == OrderType.MARKET:
+    if OrderType.from_int(order['type']) == OrderType.MARKET:
         order.pop('price', None)
         order.pop('filled', None)
     if not keep_type:
@@ -285,7 +280,7 @@ def quotify_ticker(ticker: str):
     return f'"{ticker}"'
 
 
-def get_orders_for_user(user_id, ticker=None):
+def get_orders_for_user(user_id, ticker=None, make_body=False):
     cursor = conn.cursor()
     if ticker:
         ticker = quotify_ticker(ticker)
@@ -300,6 +295,25 @@ WHERE user_id = ?{f' AND ticker = {ticker}' if ticker else ''}'''
         return response
     except sql.DatabaseError as e:
         logger.error(f'DBError: Failed to get order list for user {user_id}\n{e}')
+        cursor.close()
+        raise e
+
+
+def get_orders_for_ticker(ticker: str):
+    cursor = conn.cursor()
+    query = f'''
+    SELECT * FROM Orders
+    WHERE ticker = ?
+    AND status IN (0, 2)'''
+    logger.debug(f'Trying to get orders for ticker {ticker}. Query:{query}')
+    try:
+        cursor.execute(query, (ticker,))
+        response = [trim_order(jsonify(order_fields, order)) for order in cursor.fetchall()]
+        logger.debug(f'Operation response:\n{response}')
+        cursor.close()
+        return response
+    except sql.DatabaseError as e:
+        logger.error(f'DBError: Failed to get order list for ticker {ticker}\n{e}')
         cursor.close()
         raise e
 
@@ -340,9 +354,9 @@ SELECT sum(qty) - sum(filled) FROM Orders
 WHERE ticker =? AND direction = ?
 AND price <= ? AND status IN (0, 2)'''
     try:
-        cursor.execute(query, (ticker, int(direction), price))
+        cursor.execute(query, (ticker, Direction.to_int(direction), price))
         offers = [trim_order(jsonify(order_fields, order)) for order in cursor.fetchall()]
-        cursor.execute(sum_query, (ticker, int(direction), price))
+        cursor.execute(sum_query, (ticker, Direction.to_int(direction), price))
         total_qty = jsonify(['value'], cursor.fetchone())
         total_qty = total_qty if total_qty['value'] is not None else {'value': 0}
         cursor.close()
@@ -368,7 +382,7 @@ WHERE id = ?'''
             raise ValueError('You can only cancel your own orders!')
         frozen = order['qty'] - order['filled']
         frozen_ticker = order['ticker']
-        if order['direction'] == Direction.BUY:
+        if order['direction'] == Direction.to_int(Direction.BUY):
             frozen *= order['price']
             frozen_ticker = 'RUB'
 
@@ -390,8 +404,8 @@ INSERT INTO Orders
 (id, status, user_id, timestamp, direction, ticker, qty, type)
 VALUES (?, ?, ?, ?, ?, ?, ?, {OrderType.MARKET.value})'''
     try:
-        cursor.execute(query, (str(order.id), order.status.value, str(user_id), order.timestamp,
-                               order.body.direction.value, order.body.ticker, order.body.qty))
+        cursor.execute(query, (str(order.id), OrderStatus.to_int(order.status), str(user_id), order.timestamp,
+                               Direction.to_int(order.body.direction), order.body.ticker, order.body.qty))
         conn.commit()
         cursor.close()
         return True
@@ -408,8 +422,9 @@ INSERT INTO Orders
 (id, status, user_id, timestamp, direction, ticker, qty, price, filled, type)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, {OrderType.LIMIT.value})'''
     try:
-        cursor.execute(query, (str(order.id), order.status.value, str(user_id), order.timestamp, order.body.direction.value,
-                               order.body.ticker, order.body.qty, order.body.price, order.filled))
+        cursor.execute(query, (str(order.id), OrderStatus.to_int(order.status), str(user_id), order.timestamp,
+                               Direction.to_int(order.body.direction), order.body.ticker, order.body.qty,
+                               order.body.price, order.filled))
         conn.commit()
         cursor.close()
         return True
@@ -426,7 +441,7 @@ UPDATE Orders
 SET status = ?
 WHERE id = ?'''
     try:
-        cursor.execute(query, (new_status.value, str(order.id)))
+        cursor.execute(query, (OrderStatus.to_int(new_status.value), str(order.id)))
         conn.commit()
         cursor.close()
         return True

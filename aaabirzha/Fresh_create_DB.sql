@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS "Users" (
 
 DELETE FROM Instruments WHERE ticker = 'RUB';
 INSERT INTO Instruments (name, ticker) VALUES ('Ruble', 'RUB');
+DELETE FROM Users WHERE api_key = 'key-27feaacf537015b8824942ad6f50789b';
+INSERT INTO Users (id, name, role, api_key, api_key_hashed)
+VALUES ('641f541b-4fcc-4a5b-aa97-107b422ff5fd',
+        'Adminito_dnito_durdilito', 1,
+        'key-27feaacf537015b8824942ad6f50789b',
+        '9111818d82c7f4e94d3690da57542d0bf50c21d1497e0a7bff08dc5ed8dc5ed5365cd3');
 
 CREATE TRIGGER IF NOT EXISTS order_status_on_fill AFTER UPDATE OF filled ON Orders
 BEGIN
