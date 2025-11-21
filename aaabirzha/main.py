@@ -11,6 +11,7 @@ import logging
 
 #DB operations stored as functions
 import database as db_fnc
+from aaabirzha.database import quotify_ticker
 from aaabirzha.matching_engine import execute_market_order, execute_limit_order
 from aaabirzha.schemas import OrderStatus, Direction
 
@@ -22,7 +23,7 @@ from schemas import (
 )
 
 #Config
-app = FastAPI(title="Stock Exchange API", version="0.2.2")
+app = FastAPI(title="Stock Exchange API", version="0.3.1")
 db = db_fnc.main_cursor
 
 logging.basicConfig(
@@ -79,6 +80,11 @@ def require_role(required_role: UserRole):
         return current_user
     return _dependency
 
+#Makes sure a string is surrounded by double quotes: (RUB') -> "RUB"
+#Intended to simplify parsing of quoteless query params like .../instrument/RUB instead of .../"RUB"
+def quotify_param(param: str) -> str:
+    param = param.replace('"', '').replace("'", '')
+    return f'"{param}"'
 
 # Basic routes
 @app.get("/")
@@ -129,7 +135,7 @@ async def get_instruments():
 async def get_orderbook(ticker: str, limit: int = 10, current_user: User = Depends(get_current_user)):
     try:
         orderbook = [MarketOrder(order) if 'price' in order.keys() else LimitOrder(order)
-                     for order in db_fnc.get_orders_for_user(current_user.id, ticker=ticker)]
+                     for order in db_fnc.get_orders_for_user(current_user.id, ticker=quotify_param(ticker))]
         limit = min(limit, len(orderbook))
         return orderbook[:limit]
     except Exception as e:
@@ -139,7 +145,7 @@ async def get_orderbook(ticker: str, limit: int = 10, current_user: User = Depen
 @public_router.get("/transactions/{ticker}")
 async def get_transactions(ticker: str, limit: int = 10, current_user: User = Depends(get_current_user)):
     try:
-        transactions = db_fnc.get_transactions_by_user(current_user.id, ticker=ticker)
+        transactions = db_fnc.get_transactions_by_user(current_user.id, ticker=quotify_param(ticker))
         transactions = [Transaction(
             ticker = trans['ticker'],
             amount = trans['amount'],
@@ -176,18 +182,18 @@ async def get_orders(current_user: User = Depends(get_current_user)):
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
 @order_router.post('/')
-async def create_order(create_request: Union[MarketOrderBody, LimitOrderBody], current_user: User = Depends(get_current_user)):
+async def create_order(create_request: Union[LimitOrderBody, MarketOrderBody], current_user: User = Depends(get_current_user)):
     try:
         if isinstance(create_request, MarketOrderBody):
             order = MarketOrder(
                 id=uuid4(),
                 status=OrderStatus.NEW,
                 user_id=current_user.id,
-                body = MarketOrderBody(
-                    direction=create_request.direction,
-                    ticker=create_request.ticker,
-                    qty=create_request.ticker
-                ),
+                body = {
+                    'direction': create_request.direction,
+                    'ticker': create_request.ticker,
+                    'qty': create_request.qty
+                },
                 timestamp=datetime.now()
             )
             await execute_market_order(order, current_user)
@@ -196,15 +202,15 @@ async def create_order(create_request: Union[MarketOrderBody, LimitOrderBody], c
                 id=uuid4(),
                 status=OrderStatus.NEW,
                 user_id=current_user.id,
-                body=LimitOrderBody(
-                    direction=create_request.direction,
-                    ticker=create_request.ticker,
-                    qty=create_request.ticker,
-                    price=create_request.price
-                ),
+                body={
+                    'direction': create_request.direction,
+                    'ticker': create_request.ticker,
+                    'qty': create_request.qty,
+                    'price': create_request.price
+                },
                 timestamp=datetime.now()
             )
-            db_fnc.create_limit_order(order)
+            db_fnc.create_limit_order(order, str(current_user.id))
             await execute_limit_order(order, current_user)
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
@@ -213,14 +219,24 @@ async def create_order(create_request: Union[MarketOrderBody, LimitOrderBody], c
 @order_router.get('/{order_id}', response_model=Union[MarketOrder, LimitOrder])
 async def get_order_details(order_id: str):
     try:
-        return db_fnc.get_order_by_id(order_id)
+        response = db_fnc.get_order_by_id(order_id)
+        body = {
+            'direction': response.pop('direction'),
+            'ticker': response.pop('ticker'),
+            'qty': response.pop('qty')
+        }
+        if 'price' in response.keys():
+            body['price'] = response.pop('price')
+        response['body'] = body
+        return response
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
 @order_router.delete('/{order_id}', response_model=Ok)
-async def calcel_order(order_id: str):
+async def cancel_order(order_id: str, current_user: User = Depends(get_current_user)):
     try:
-        db_fnc.cancel_order(order_id)
+        db_fnc.cancel_order(str(order_id), current_user)
+        return Ok
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
@@ -229,14 +245,13 @@ app.include_router(order_router)
 
 #Admin endpoints, ADMIN user role dependency check included
 admin_router = APIRouter(prefix="/api/v1/admin", tags=["admin"], dependencies=[Depends(require_role(UserRole.ADMIN))])
-# admin_router = APIRouter(prefix="/api/v1/admin", tags=["admin"])
 
 @admin_router.delete("/user/{user_id}", response_model=User, tags=["admin", "user"])
 async def delete_user(user_id: UUID):
     try:
-        user_data = db_fnc.delete_user(user_id)
+        user_data = db_fnc.delete_user(str(user_id))
         user = User(
-            id=user_data['user_id'],
+            id=user_data['id'],
             name=user_data['name'],
             role=user_data['role'],
             api_key=user_data['api_key']
@@ -262,16 +277,17 @@ async def create_instrument(create_request: InstrumentCreate):
 async def delete_instrument(ticker: str):
     try:
         db_fnc.delete_instrument(ticker)
+        return Ok()
     except Exception as e:
         raise HTTPException(status_code=422, detail=f"Validation Error: {e}")
 
 
 @admin_router.post("/balance/deposit", response_model=Ok, tags=["admin", "balance"])
-async def update_balance(request: AlterBalanceRequest, is_deposit=True):
+async def update_balance(request: AlterBalanceRequest):
     if not db_fnc.lookup('Users', 'id', str(request.user_id)):
         raise HTTPException(status_code=422, detail='User not found')
     try:
-        db_fnc.update_balance(request.user_id, request.ticker, request.amount, is_deposit)
+        db_fnc.update_balance(request.user_id, request.ticker, request.amount, False)
         return Ok()
     except Exception as e:
         if isinstance(e, ValueError):
@@ -282,7 +298,8 @@ async def update_balance(request: AlterBalanceRequest, is_deposit=True):
 
 @admin_router.post("/balance/withdraw", response_model=Ok, tags=["admin", "balance"])
 async def admin_withdraw(request: AlterBalanceRequest):
-    return await update_balance(request, is_deposit=False)
+    request.amount *= -1
+    return await update_balance(request)
 
 app.include_router(admin_router)
 
